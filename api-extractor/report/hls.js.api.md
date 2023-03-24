@@ -278,6 +278,8 @@ export class BaseSegment {
     // (undocumented)
     elementaryStreams: ElementaryStreams;
     // (undocumented)
+    isPreload?: boolean;
+    // (undocumented)
     relurl?: string;
     // (undocumented)
     setByteRange(value: string, previous?: BaseSegment): void;
@@ -330,6 +332,10 @@ export class BaseStreamController extends TaskLoop implements NetworkComponentAP
     //
     // (undocumented)
     protected fragmentLoader: FragmentLoader;
+    // Warning: (ae-forgotten-export) The symbol "FragmentPreloader" needs to be exported by the entry point hls.d.ts
+    //
+    // (undocumented)
+    protected fragmentPreloader: FragmentPreloader;
     // (undocumented)
     protected fragmentTracker: FragmentTracker;
     // (undocumented)
@@ -386,6 +392,10 @@ export class BaseStreamController extends TaskLoop implements NetworkComponentAP
     protected levelLastLoaded: number | null;
     // (undocumented)
     protected levels: Array<Level> | null;
+    // (undocumented)
+    protected loadAndCachePreloadHint(details: LevelDetails): void;
+    // (undocumented)
+    protected loadedEndOfParts(partList: Part[], targetBufferTime: number): boolean;
     // (undocumented)
     protected loadedmetadata: boolean;
     // (undocumented)
@@ -2109,7 +2119,7 @@ export type LevelControllerConfig = {
 //
 // @public
 export class LevelDetails {
-    constructor(baseUrl: any);
+    constructor(baseUrl: string);
     // (undocumented)
     advanced: boolean;
     // (undocumented)
@@ -2186,6 +2196,11 @@ export class LevelDetails {
     partTarget: number;
     // (undocumented)
     playlistParsingError: Error | null;
+    // (undocumented)
+    preloadData?: {
+        frag: Fragment;
+        part?: Part;
+    };
     // (undocumented)
     preloadHint?: AttrList;
     // (undocumented)
@@ -2846,7 +2861,7 @@ export interface NonNativeTextTracksData {
 //
 // @public
 export class Part extends BaseSegment {
-    constructor(partAttrs: AttrList, frag: Fragment, baseurl: string, index: number, previous?: Part);
+    constructor(partAttrs: AttrList, frag: Fragment, baseurl: string, index: number, previous?: Part, isPreload?: boolean);
     // (undocumented)
     readonly duration: number;
     // (undocumented)

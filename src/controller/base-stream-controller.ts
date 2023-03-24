@@ -49,6 +49,9 @@ import type { HlsConfig } from '../config';
 import type { NetworkComponentAPI } from '../types/component-api';
 import type { SourceBufferName } from '../types/buffer';
 import type { RationalTimestamp } from '../utils/timescale-conversion';
+import FragmentPreloader, {
+  FragPreloadRequestState,
+} from '../loader/fragment-preloader';
 
 type ResolveFragLoaded = (FragLoadedEndData) => void;
 type RejectFragLoaded = (LoadError) => void;
@@ -92,6 +95,7 @@ export default class BaseStreamController
   protected retryDate: number = 0;
   protected levels: Array<Level> | null = null;
   protected fragmentLoader: FragmentLoader;
+  protected fragmentPreloader: FragmentPreloader;
   protected keyLoader: KeyLoader;
   protected levelLastLoaded: number | null = null;
   protected startFragRequested: boolean = false;
@@ -118,6 +122,7 @@ export default class BaseStreamController
     this.warn = logger.warn.bind(logger, `${logPrefix}:`);
     this.hls = hls;
     this.fragmentLoader = new FragmentLoader(hls.config);
+    this.fragmentPreloader = new FragmentPreloader(hls.config, logPrefix);
     this.keyLoader = keyLoader;
     this.fragmentTracker = fragmentTracker;
     this.config = hls.config;
@@ -136,7 +141,8 @@ export default class BaseStreamController
 
   public stopLoad() {
     this.fragmentLoader.abort();
-    this.keyLoader.abort(this.playlistType);
+    this.fragmentPreloader.abort();
+    this.keyLoader.abort();
     const frag = this.fragCurrent;
     if (frag?.loader) {
       frag.abortRequests();
@@ -307,6 +313,14 @@ export default class BaseStreamController
     this.initPTS = [];
   }
 
+  protected loadAndCachePreloadHint(details: LevelDetails): void {
+    const data = details.preloadData;
+    if (!data) {
+      return;
+    }
+    this.fragmentPreloader.preload(data.frag, data.part);
+  }
+
   protected onHandlerDestroying() {
     this.stopLoad();
     super.onHandlerDestroying();
@@ -316,6 +330,9 @@ export default class BaseStreamController
     this.state = State.STOPPED;
     if (this.fragmentLoader) {
       this.fragmentLoader.destroy();
+    }
+    if (this.fragmentPreloader) {
+      this.fragmentPreloader.destroy();
     }
     if (this.keyLoader) {
       this.keyLoader.destroy();
@@ -330,6 +347,7 @@ export default class BaseStreamController
       this.decrypter =
       this.keyLoader =
       this.fragmentLoader =
+      this.fragmentPreloader =
       this.fragmentTracker =
         null as any;
     super.onHandlerDestroyed();
@@ -663,6 +681,10 @@ export default class BaseStreamController
         if (targetBufferTime > frag.end && details.fragmentHint) {
           frag = details.fragmentHint;
         }
+        const loadedEndOfParts = this.loadedEndOfParts(
+          partList,
+          targetBufferTime,
+        );
         const partIndex = this.getNextPart(partList, frag, targetBufferTime);
         if (partIndex > -1) {
           const part = partList[partIndex];
@@ -718,10 +740,16 @@ export default class BaseStreamController
             );
           }
           return result;
-        } else if (
-          !frag.url ||
-          this.loadedEndOfParts(partList, targetBufferTime)
-        ) {
+        } else if (!frag.url || loadedEndOfParts) {
+          if (
+            loadedEndOfParts &&
+            this.hls.lowLatencyMode &&
+            details?.live &&
+            details.canBlockReload &&
+            this.fragmentPreloader.state === FragPreloadRequestState.IDLE
+          ) {
+            this.loadAndCachePreloadHint(details);
+          }
           // Fragment hint has no parts
           return Promise.resolve(null);
         }
@@ -746,23 +774,28 @@ export default class BaseStreamController
     let result: Promise<PartsLoadedData | FragLoadedData | null>;
     if (dataOnProgress && keyLoadingPromise) {
       result = keyLoadingPromise
-        .then((keyLoadedData) => {
+        .then((keyLoadedData: void | KeyLoadedData) => {
           if (!keyLoadedData || this.fragContextChanged(keyLoadedData?.frag)) {
             return null;
           }
-          return this.fragmentLoader.load(frag, progressCallback);
+          return this.getCachedRequestOrLoad(
+            frag,
+            null,
+            true,
+            progressCallback,
+          );
         })
         .catch((error) => this.handleFragLoadError(error));
     } else {
       // load unencrypted fragment data with progress event,
       // or handle fragment result after key and fragment are finished loading
-      result = Promise.all([
-        this.fragmentLoader.load(
-          frag,
-          dataOnProgress ? progressCallback : undefined,
-        ),
-        keyLoadingPromise,
-      ])
+      const loadRequest = this.getCachedRequestOrLoad(
+        frag,
+        null,
+        dataOnProgress,
+        progressCallback,
+      );
+      result = Promise.all([loadRequest, keyLoadingPromise])
         .then(([fragLoadedData]) => {
           if (!dataOnProgress && fragLoadedData && progressCallback) {
             progressCallback(fragLoadedData);
@@ -791,8 +824,7 @@ export default class BaseStreamController
         const partsLoaded: FragLoadedData[] = [];
         const initialPartList = level.details?.partList;
         const loadPart = (part: Part) => {
-          this.fragmentLoader
-            .loadPart(frag, part, progressCallback)
+          this.getCachedRequestOrLoad(frag, part, true, progressCallback)
             .then((partLoadedData: FragLoadedData) => {
               partsLoaded[part.index] = partLoadedData;
               const loadedPart = partLoadedData.part as Part;
@@ -814,6 +846,36 @@ export default class BaseStreamController
         };
         loadPart(fromPart);
       },
+    );
+  }
+
+  private getCachedRequestOrLoad(
+    frag: Fragment,
+    part: Part | null,
+    dataOnProgress: boolean,
+    progressCallback?: FragmentLoadProgressCallback,
+  ): Promise<FragLoadedData | PartsLoadedData> {
+    const request = this.fragmentPreloader.getCachedRequest(frag, part);
+    if (request !== null) {
+      return request.then((data) => {
+        if (progressCallback) {
+          progressCallback(data);
+        }
+        return data;
+      });
+    }
+
+    if (part) {
+      return this.fragmentLoader.loadPart(
+        frag,
+        part,
+        progressCallback ?? (() => {}),
+      );
+    }
+
+    return this.fragmentLoader.load(
+      frag,
+      dataOnProgress ? progressCallback : undefined,
     );
   }
 
@@ -1163,7 +1225,7 @@ export default class BaseStreamController
     return nextPart;
   }
 
-  private loadedEndOfParts(
+  protected loadedEndOfParts(
     partList: Part[],
     targetBufferTime: number,
   ): boolean {
@@ -1477,6 +1539,7 @@ export default class BaseStreamController
     ) {
       this.state = State.IDLE;
     }
+    this.fragmentPreloader.abort();
   }
 
   protected onFragmentOrKeyLoadError(
@@ -1624,6 +1687,7 @@ export default class BaseStreamController
     this.log('Reset loading state');
     this.fragCurrent = null;
     this.fragPrevious = null;
+    this.fragmentPreloader.abort();
     this.state = State.IDLE;
   }
 

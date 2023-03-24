@@ -44,6 +44,7 @@ export class LevelDetails {
   public holdBack: number = 0;
   public partTarget: number = 0;
   public preloadHint?: AttrList;
+  public preloadData?: { frag: Fragment; part?: Part };
   public renditionReports?: AttrList[];
   public tuneInGoal: number = 0;
   public deltaUpdateFailed?: boolean;
@@ -56,7 +57,7 @@ export class LevelDetails {
   public variableList: VariableMap | null = null;
   public hasVariableRefs = false;
 
-  constructor(baseUrl) {
+  constructor(baseUrl: string) {
     this.fragments = [];
     this.encryptedFragments = [];
     this.dateRanges = {};
@@ -117,7 +118,8 @@ export class LevelDetails {
 
   get partEnd(): number {
     if (this.partList?.length) {
-      return this.partList[this.partList.length - 1].end;
+      const lastPart = this.partList[this.partList.length - 1];
+      return lastPart.end;
     }
     return this.fragmentEnd;
   }
