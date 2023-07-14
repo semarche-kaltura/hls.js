@@ -43,6 +43,9 @@ export default class BufferController implements ComponentAPI {
   private operationQueue!: BufferOperationQueue;
   // References to event listeners for each SourceBuffer, so that they can be referenced for event removal
   private listeners!: SourceBufferListeners;
+  // Duration set when video append is made during playback at a position earlier than the playhead
+  // indicates that it is likely that frames or GoPs are being dropped
+  private videoBufferStarvation: number = 0;
 
   private hls: Hls;
 
@@ -68,8 +71,13 @@ export default class BufferController implements ComponentAPI {
     audiovideo: 0,
   };
 
+  // Active SourceBuffers and buffer information by type
   public tracks: TrackSet = {};
+
+  // Pending SourceBuffers and buffer information by type
   public pendingTracks: TrackSet = {};
+
+  // SourceBuffer instances by type
   public sourceBuffer!: SourceBuffers;
 
   protected log: (msg: any) => void;
@@ -338,11 +346,11 @@ export default class BufferController implements ComponentAPI {
     event: Events.BUFFER_APPENDING,
     eventData: BufferAppendingData
   ) {
+    const bufferAppendingStart = self.performance.now();
     const { hls, operationQueue, tracks } = this;
     const { data, type, frag, part, chunkMeta } = eventData;
     const chunkStats = chunkMeta.buffering[type];
 
-    const bufferAppendingStart = self.performance.now();
     chunkStats.start = bufferAppendingStart;
     const fragBuffering = frag.stats.buffering;
     const partBuffering = part ? part.stats.buffering : null;
@@ -368,12 +376,14 @@ export default class BufferController implements ComponentAPI {
       this.lastMpegAudioChunk = chunkMeta;
     }
 
+    const elementaryStream = (part ? part : frag).elementaryStreams[type];
+    const startPTS = elementaryStream?.startPTS;
     const fragStart = frag.start;
     const operation: BufferOperation = {
       execute: () => {
         chunkStats.executeStart = self.performance.now();
+        const sb = this.sourceBuffer[type];
         if (checkTimestampOffset) {
-          const sb = this.sourceBuffer[type];
           if (sb) {
             const delta = fragStart - sb.timestampOffset;
             if (Math.abs(delta) >= 0.1) {
@@ -383,6 +393,23 @@ export default class BufferController implements ComponentAPI {
               sb.timestampOffset = fragStart;
             }
           }
+        }
+        const media = this.media;
+        if (
+          type === 'video' &&
+          startPTS !== undefined &&
+          media &&
+          sb?.buffered.length &&
+          !media.seeking &&
+          !media.paused
+        ) {
+          const currentTime = this.media?.currentTime;
+          const videoAppendDelay = Number.isFinite(currentTime)
+            ? currentTime! - startPTS
+            : 0;
+          this.videoBufferStarvation = videoAppendDelay;
+        } else {
+          this.videoBufferStarvation = 0;
         }
         this.appendExecutor(data, type);
       },
@@ -400,12 +427,21 @@ export default class BufferController implements ComponentAPI {
           partBuffering.first = end;
         }
 
-        const { sourceBuffer } = this;
+        const { sourceBuffer, videoBufferStarvation } = this;
         const timeRanges = {};
         for (const type in sourceBuffer) {
           timeRanges[type] = BufferHelper.getBuffered(sourceBuffer[type]);
         }
         this.appendErrors[type] = 0;
+        const videoBufferStarvationThreshold =
+          this.hls.config.videoBufferStarvationThreshold;
+        if (videoBufferStarvation > videoBufferStarvationThreshold) {
+          this.log(
+            `Appended video ${videoBufferStarvation.toFixed(
+              3
+            )}s before playhead`
+          );
+        }
         this.hls.trigger(Events.BUFFER_APPENDED, {
           type,
           frag,
@@ -413,6 +449,7 @@ export default class BufferController implements ComponentAPI {
           chunkMeta,
           parent: frag.type,
           timeRanges,
+          videoBufferStarvation,
         });
       },
       onError: (err) => {

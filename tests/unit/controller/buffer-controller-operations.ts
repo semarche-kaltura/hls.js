@@ -1,7 +1,7 @@
 import sinon from 'sinon';
 import chai from 'chai';
 import sinonChai from 'sinon-chai';
-import Hls from '../../../src/hls';
+import Hls, { BufferAppendedData } from '../../../src/hls';
 
 import BufferOperationQueue from '../../../src/controller/buffer-operation-queue';
 import BufferController from '../../../src/controller/buffer-controller';
@@ -187,6 +187,18 @@ describe('BufferController', function () {
           part: null,
           chunkMeta,
         };
+        const expectedAppendedData: BufferAppendedData = {
+          parent: PlaylistLevelType.MAIN,
+          type: name,
+          timeRanges: {
+            audio: buffers.audio.buffered,
+            video: buffers.video.buffered,
+          },
+          frag,
+          part: null,
+          chunkMeta,
+          videoBufferStarvation: 0,
+        };
 
         bufferController.onBufferAppending(Events.BUFFER_APPENDING, data);
         expect(
@@ -206,17 +218,7 @@ describe('BufferController', function () {
         expect(
           triggerSpy,
           'BUFFER_APPENDED should be triggered upon completion of the operation'
-        ).to.have.been.calledWith(Events.BUFFER_APPENDED, {
-          parent: 'main',
-          type: name,
-          timeRanges: {
-            audio: buffers.audio.buffered,
-            video: buffers.video.buffered,
-          },
-          frag,
-          part: null,
-          chunkMeta,
-        });
+        ).to.have.been.calledWith(Events.BUFFER_APPENDED, expectedAppendedData);
         expect(
           shiftAndExecuteNextSpy,
           'The queue should have been cycled'

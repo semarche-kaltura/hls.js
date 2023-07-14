@@ -50,6 +50,7 @@ export type BufferControllerConfig = {
   appendErrorMaxRetry: number;
   backBufferLength: number;
   liveDurationInfinity: boolean;
+  videoBufferStarvationThreshold: number;
   /**
    * @deprecated use backBufferLength
    */
@@ -329,6 +330,7 @@ export const hlsDefaultConfig: HlsConfig = {
   liveMaxLatencyDuration: undefined, // used by latency-controller
   maxLiveSyncPlaybackRate: 1, // used by latency-controller
   liveDurationInfinity: false, // used by buffer-controller
+  videoBufferStarvationThreshold: 0.05, // used by buffer-controller
   /**
    * @deprecated use backBufferLength
    */
